@@ -136,7 +136,11 @@ class GNPSInput:
 
 @dataclass
 class GNPSResult:
-    """Output of GNPSProcessor: the per-feature annotation records."""
+    """Output of GNPSProcessor: the per-feature annotation records.
+
+    ``process`` always sets ``annotations`` explicitly; the default factory just
+    keeps the dataclass constructible with no arguments (e.g. an empty result).
+    """
 
     annotations: Records = field(default_factory=list)
 
@@ -149,13 +153,11 @@ class GNPSResult:
 def _records_to_frame(records: Records) -> pd.DataFrame:
     """Build a DataFrame from records, forcing ``object`` dtype.
 
-    This is the one place the object-dtype decision is explained. ``pd.DataFrame``
-    infers a column's dtype from its values, so an id column mixing an integer
-    with a non-integer (``1`` and ``1.5``) becomes ``float64`` *at construction*,
-    before canonicalisation runs, silently rounding large integers through float
-    (``9007199254740993`` -> ``...992.0``). Object dtype keeps every cell as its
-    original Python value so :func:`_canonical_id` sees exact ids; numeric paths
-    coerce with ``pd.to_numeric`` themselves and are unaffected.
+    Object dtype keeps every cell as its original Python value, so
+    :func:`_canonical_id` sees exact ids instead of a column pandas has already
+    coerced to ``float64`` (which would round large integer ids through float at
+    construction time). The numeric output paths coerce with ``pd.to_numeric``
+    themselves and are unaffected.
     """
     records = list(records)
     return pd.DataFrame(records, dtype=object) if records else pd.DataFrame()
@@ -185,23 +187,13 @@ def _is_bool(value: Any) -> bool:
 def _canonical_id(value: Any) -> Any:
     """Normalise a feature id so the same feature matches across tables.
 
-    Feature ids arrive in whatever type each source happens to use: a DB or
-    JSON source yields ``int``, pandas reading a CSV with blanks yields
-    ``float`` (``1.0``), and a plain CSV reader yields ``str`` (``"1"``). All of
-    these denote the same feature and must collapse to one key, or the merge
-    silently splits a feature into separate half-populated rows.
-
     The rule: an integer-valued id becomes ``int`` (so ``1``, ``1.0`` and ``"1"``
-    all become ``1``, with full precision for large ids); a non-integer number
-    becomes ``float``; anything else becomes ``str``. A missing id (``None`` or
-    the ``NaN`` pandas yields for a blank cell) returns :data:`_MISSING_ID` so the
-    row is dropped rather than crashing.
-
-    Note the consequence of parsing string ids numerically: ``"1e3"`` merges with
-    the integer ``1000``; ``"NaN"``/``"nan"`` is treated as missing (so a text id
-    literally spelled "NaN" disappears); ``"inf"``/``"-inf"`` is kept as text so
-    it can't masquerade as a feature. None of these collide with real MZmine/GNPS
-    numeric ids; a genuine non-numeric text id survives untouched.
+    all collapse to ``1``, at full precision for large ids); a non-integer number
+    becomes ``float``; anything else stays ``str``. A missing id (``None`` or the
+    ``NaN`` pandas yields for a blank cell) returns :data:`_MISSING_ID` so the row
+    is dropped rather than crashing. See the module docstring ("Feature
+    matching") for why, and for the edge cases of parsing string ids numerically
+    (``"1e3"`` merges with ``1000``; ``"inf"`` stays text; ``"nan"`` is missing).
     """
     if value is None:
         return _MISSING_ID
@@ -247,11 +239,7 @@ def _from_float(as_float: float, fallback: Any) -> Any:
 
 
 def _canonical_index(index: pd.Index) -> pd.Index:
-    """Return ``index`` with every label canonicalised by :func:`_canonical_id`.
-
-    Object dtype for the same reason as :func:`_records_to_frame`: keep each
-    label's exact type rather than let pandas coerce the index to ``float64``.
-    """
+    """Canonicalise every label in ``index`` (object dtype, see _records_to_frame)."""
     return pd.Index([_canonical_id(v) for v in index], name=index.name, dtype=object)
 
 
@@ -264,11 +252,9 @@ def _drop_missing_ids(indexed: pd.DataFrame) -> pd.DataFrame:
 def _unique_by_canonical_id(indexed: pd.DataFrame) -> pd.DataFrame:
     """Canonicalise a just-set index, drop missing ids, keep the first per id.
 
-    Shared by every indexing path (annotations, library, feature table) so they
-    stay consistent: canonicalise the labels, drop rows with no usable id, and
-    collapse any ids that canonicalise to the same value (e.g. ``1`` and
-    ``"1"``) by keeping the first — which upstream has already ordered so the
-    best-scoring row wins.
+    Shared by every indexing path so they stay consistent. Collapsing cross-type
+    duplicates (e.g. ``1`` and ``"1"``) keeps the first, which upstream has
+    already ordered so the best-scoring row wins.
     """
     indexed = indexed.copy()
     indexed.index = _canonical_index(indexed.index)
@@ -276,7 +262,7 @@ def _unique_by_canonical_id(indexed: pd.DataFrame) -> pd.DataFrame:
     return indexed[~indexed.index.duplicated(keep="first")]
 
 
-def _best_per_feature(
+def _index_by_feature(
     df: pd.DataFrame, id_candidates: list[str], score_col: str | None = None
 ) -> pd.DataFrame | None:
     """Index ``df`` by feature id, keeping the highest-``score_col`` row per id.
@@ -304,10 +290,13 @@ def _best_per_feature(
         ]
     else:
         ordered = df
-    # Keep the first row per raw id (already highest-scoring), then let the
-    # shared helper canonicalise, drop missing ids, and collapse cross-type
-    # duplicates (e.g. 1 and "1") — keeping the first, i.e. the best-scoring.
-    indexed = ordered.drop_duplicates(subset=[id_col], keep="first").set_index(id_col)
+    # Set the id as the index, then let the shared helper canonicalise it, drop
+    # missing ids, and collapse duplicates — keeping the first per canonical id,
+    # which the score sort above has made the best-scoring. Deduplicating on the
+    # *canonical* id (not the raw one) is what makes 1 and "1" collapse while
+    # keeping e.g. the integer 1 and the boolean True distinct (True canonicalises
+    # to text), since raw 1 == True would otherwise be treated as one id.
+    indexed = ordered.set_index(id_col)
     return _unique_by_canonical_id(indexed)
 
 
@@ -318,6 +307,26 @@ def _aligned_column(
     if source is not None and src_col in source.columns:
         return source[src_col].reindex(feature_ids)
     return pd.Series(pd.NA, index=feature_ids)
+
+
+def _to_text(value: Any) -> str:
+    """Render a text-column cell as a string: blank -> "".
+
+    Real exports supply these columns as strings already. The one subtlety is a
+    stray numeric: a bare ``str(1.0)`` would leak ``"1.0"``, so an integer-valued
+    float is rendered without the trailing ``.0`` (``1.0`` -> ``"1"``), matching
+    how the same value reads as a feature id. Non-finite floats render as "".
+    """
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _sort_key(value: Any) -> tuple[int, str, Any]:
@@ -368,9 +377,9 @@ class GNPSProcessor(Processor):
     ) -> Records:
         # Scored tables keep the highest-scoring row per feature; the feature
         # table is unscored (score_col=None -> first row per id wins).
-        ann = _best_per_feature(annotations, _ANNOTATION_ID_CANDIDATES, "score")
-        lib = _best_per_feature(library, _LIBRARY_ID_CANDIDATES, "MQScore")
-        feat = _best_per_feature(feature_table, _FEATURE_TABLE_ID_CANDIDATES)
+        ann = _index_by_feature(annotations, _ANNOTATION_ID_CANDIDATES, "score")
+        lib = _index_by_feature(library, _LIBRARY_ID_CANDIDATES, "MQScore")
+        feat = _index_by_feature(feature_table, _FEATURE_TABLE_ID_CANDIDATES)
 
         # Output row set = union of features annotated by either source (see the
         # module docstring); a feature-table-only feature contributes no id here.
@@ -419,9 +428,10 @@ class GNPSProcessor(Processor):
                 nums = pd.to_numeric(series, errors="coerce")
                 tidy[col] = nums.astype(object).where(np.isfinite(nums), None)
             else:
-                # Text columns are string at the source; a stray numeric would
-                # stringify verbatim, which never happens with real exports.
-                tidy[col] = series.where(series.notna(), "").astype(str)
+                # Text columns are strings at the source for real exports; a
+                # stray numeric is still rendered sensibly (see _to_text) rather
+                # than leaking a "1.0"-style artifact.
+                tidy[col] = [_to_text(v) for v in series]
 
         # Prepend the Feature ID (from the id list, exact type) and rebuild rows
         # with str keys so the result matches the declared Records type.

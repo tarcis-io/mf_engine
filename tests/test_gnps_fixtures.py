@@ -7,9 +7,9 @@ library-match TSV), complementing the hand-built cases in ``test_gnps.py``.
 The fixtures are loaded exactly as a caller would: read each file with pandas
 and hand the rows to the processor as ``list[dict]`` via ``to_dict("records")``.
 Paths are resolved against this test file's own directory so the suite runs the
-same no matter where pytest is invoked from. If a fixture is missing, the
-affected test is skipped rather than failed, so the rest of the suite still runs
-on a checkout without the data.
+same no matter where pytest is invoked from. The fixtures are committed to the
+repository, so a missing one is a broken checkout and fails the test rather than
+skipping it silently.
 """
 
 from __future__ import annotations
@@ -29,14 +29,13 @@ pd = pytest.importorskip("pandas")
 FIXTURES = Path(__file__).parent / "fixtures"
 
 _ANNOTATIONS_CSV = FIXTURES / "mzmine_annotations.csv"
-_FEATURE_TABLE_CSV = FIXTURES / "gnps_feature_table_reformated.csv"
+_FEATURE_TABLE_CSV = FIXTURES / "gnps_feature_table_reformatted.csv"
 _LIBRARY_TSV = FIXTURES / "gnps_merged_results.tsv"
 
 
 def _records(path: Path, *, sep: str = ",") -> list[dict]:
-    """Load a fixture as records, or skip the test if it isn't present."""
-    if not path.exists():
-        pytest.skip(f"fixture not found: {path.name}")
+    """Load a committed fixture as records; a missing one is a broken checkout."""
+    assert path.exists(), f"committed fixture missing: {path.name}"
     return pd.read_csv(path, sep=sep).to_dict("records")
 
 

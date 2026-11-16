@@ -11,6 +11,9 @@ from mf_engine.processors.gnps import (
     GNPSInput,
     GNPSProcessor,
     GNPSResult,
+    _canonical_id,
+    _sort_key,
+    _to_text,
 )
 
 
@@ -591,3 +594,50 @@ def test_process_is_idempotent_and_does_not_mutate_input():
     second = proc.process(inp).annotations
     assert first == second
     assert inp.annotations == original  # input not mutated
+
+
+def test_boolean_ids_are_kept_as_text_not_integer_ids():
+    # bool is an int subclass, so without the explicit guard True/False would
+    # canonicalise to the integer ids 1/0. They must stay text in both the
+    # canonical key and the sort, so a boolean id can't collide with feature 0/1.
+    assert _canonical_id(True) == "True"
+    assert _canonical_id(False) == "False"
+    assert _sort_key(True) == (1, "True", None)
+    # End-to-end: a boolean id and the integer id 1 are distinct features and
+    # sorting the mixed set does not raise.
+    inp = GNPSInput(
+        annotations=[
+            {"id": 1, "compound_name": "int-one", "score": 0.5},
+            {"id": True, "compound_name": "bool-true", "score": 0.5},
+        ],
+        feature_table=[],
+        library=[],
+    )
+    by_id = {r["Feature ID"]: r for r in GNPSProcessor().process(inp).annotations}
+    assert by_id[1]["Compound MZmine"] == "int-one"
+    assert by_id["True"]["Compound MZmine"] == "bool-true"
+
+
+def test_to_text_renders_values_sensibly():
+    # Blanks (None / NaN) become ""; an integer-valued float drops its trailing
+    # ".0" (so a stray numeric in a text column reads like a feature id would),
+    # non-integer floats and plain strings stringify as-is, and non-finite floats
+    # become "".
+    assert _to_text(None) == ""
+    assert _to_text(float("nan")) == ""
+    assert _to_text(float("inf")) == ""
+    assert _to_text(1.0) == "1"
+    assert _to_text(1.5) == "1.5"
+    assert _to_text("Skimmianine") == "Skimmianine"
+
+
+def test_stray_numeric_text_value_has_no_float_artifact():
+    # A numeric value landing in a text output column (e.g. a compound name read
+    # as a number) must not leak a "1.0"-style artifact — it renders as "1".
+    inp = GNPSInput(
+        annotations=[{"id": 1, "compound_name": 1.0, "score": 0.5}],
+        feature_table=[],
+        library=[],
+    )
+    row = GNPSProcessor().process(inp).annotations[0]
+    assert row["Compound MZmine"] == "1"

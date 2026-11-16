@@ -24,4 +24,4 @@ lint:  ## Lint with ruff
 typecheck:  ## Type-check with mypy
 	mypy
 
-check: lint typecheck test  ## Run lint, type-check, and tests
+check: lint typecheck cov  ## Run lint, type-check, and tests with coverage

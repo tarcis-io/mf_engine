@@ -77,21 +77,12 @@ The output schema — the exact keys, in order, of every result record — is
 available as `mf_engine.processors.ANNOTATION_COLUMNS`, handy for building a
 header row or validating output.
 
-Key guarantees (the `GNPSProcessor` module docstring has the full detail):
-
-- Every output field is a **direct passthrough** of an input column — no derived
-  or interpretive fields (best-of picks, confidence, compound-class flags). Those
-  belong to the caller.
-- The output is the **union of features annotated by either source**; a feature
-  present only in the feature table is omitted. One-source features are returned
-  with the other source's columns blank.
-- Features join by feature id matched *by value regardless of type* (`1`, `1.0`,
-  `"1"` are one feature), with integer ids kept at full precision.
-- Per source, the highest-scoring row per feature wins; non-numeric, blank, and
-  non-finite scores count as missing. Ties and all-missing fall back to input
-  order, so output is deterministic.
-- Messy inputs are tolerated, not fatal: a blank id drops just that row; a
-  missing column or empty table yields blanks rather than raising.
+In short: every output field is a direct passthrough (no derived or best-of
+fields — those are the caller's job); the rows are the union of features
+annotated by either source; features join by id matched regardless of type; the
+highest-scoring row per feature wins, deterministically; and messy inputs yield
+blanks rather than raising. The `GNPSProcessor` module docstring is the
+authoritative reference for all of these.
 
 `GNPSProcessor` needs pandas — install the `data` extra. The base `Processor`
 and `import mf_engine` stay dependency-free; pandas is only loaded when a GNPS
@@ -100,12 +91,9 @@ symbol is used.
 ## Version
 
 `mf_engine.__version__` is read from the installed package metadata (the single
-source of truth is `pyproject.toml`). When the package is imported from a source
-tree that has **not** been installed, the metadata is unavailable and the value
-falls back to `"0.0.0"` — so `__version__` matches `pyproject.toml` only once
-the package is installed (`pip install -e .`). In practice this means a bare
-`src` checkout that was never installed reports `0.0.0`; install the package to
-get the real version.
+source of truth is `pyproject.toml`). A source tree that was never installed has
+no metadata, so it falls back to `"0.0.0"`; install the package
+(`pip install -e .`) to get the real version.
 
 ## Development
 
@@ -144,7 +132,7 @@ mf_engine/                    # repository root
     ├── test_processor.py     # the Processor ABC + package surface
     ├── test_gnps.py          # GNPSProcessor unit tests (hand-built cases)
     ├── test_gnps_fixtures.py # GNPSProcessor integration tests (real exports)
-    └── fixtures/             # sample MZmine + GNPS export files
+    └── fixtures/             # sample MZmine annotations + GNPS feature/library tables
 ```
 
 This uses the **src layout** so tests always run against the installed package,

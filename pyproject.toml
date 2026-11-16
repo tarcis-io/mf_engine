@@ -59,6 +59,9 @@ source = ["mf_engine"]
 
 [tool.coverage.report]
 show_missing = true
+# Fail CI if coverage regresses. The suite covers effectively every branch; the
+# margin below 100 absorbs a stray uncovered line. Raise toward 100 as desired.
+fail_under = 95
 # Pragmas already used in the source (e.g. trivial no-op process() bodies).
 exclude_also = [
     "pragma: no cover",
@@ -87,11 +90,10 @@ files = ["src", "tests"]
 mypy_path = "src"
 explicit_package_bases = true
 namespace_packages = true
-# Strong-but-pragmatic checks rather than full `strict`: the GNPS processor
-# leans on pandas, whose dynamic return types make strict mode noisy. These
-# flags catch the mistakes that matter (missing annotations, unreachable code,
-# silent Anys at the boundary) without fighting pandas internally. Tighten
-# toward `strict = true` later if desired.
+# Strong-but-pragmatic checks rather than full `strict`: pandas' dynamic return
+# types make strict mode noisy, so these flags catch the mistakes that matter
+# (missing annotations, unreachable code, silent Anys at the boundary) without
+# fighting pandas internally. Tighten toward `strict = true` later if desired.
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
