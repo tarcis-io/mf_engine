@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from mf_engine import Processor
 from mf_engine.processors.gnps import (
+    _MISSING_ID,
     _NUMERIC_COLUMNS,
     ANNOTATION_COLUMNS,
     GNPSInput,
@@ -641,3 +643,37 @@ def test_stray_numeric_text_value_has_no_float_artifact():
     )
     row = GNPSProcessor().process(inp).annotations[0]
     assert row["Compound MZmine"] == "1"
+
+
+def test_canonical_id_handles_numpy_integer_scalar():
+    # pandas hands back numpy scalars, not Python ints. A numpy integer isn't an
+    # ``int`` instance but exposes ``__index__``, so it must still canonicalise to
+    # an exact Python int (and merge with the same id supplied as a plain int).
+    assert _canonical_id(np.int64(5)) == 5
+    assert isinstance(_canonical_id(np.int64(5)), int)
+
+
+def test_canonical_id_numpy_float_infinity_is_kept_as_text():
+    # A numpy (non-str, non-int) ±inf reaches the numeric-ish fallback path and,
+    # like a string "inf", must be kept as text rather than treated as a usable
+    # feature id.
+    assert _canonical_id(np.float64("inf")) == "inf"
+    assert _canonical_id(np.float64("-inf")) == "-inf"
+
+
+def test_canonical_id_unconvertible_value_falls_back_to_text():
+    # A value that is none of None/bool/int/__index__/str and can't be coerced to
+    # float (e.g. a tuple) must not crash: it falls back to its string form.
+    assert _canonical_id((1, 2)) == "(1, 2)"
+
+
+def test_to_text_survives_values_whose_na_check_raises():
+    # pd.isna on an array-like returns an array, whose truthiness raises; _to_text
+    # must swallow that and stringify the value rather than propagate the error.
+    assert _to_text(np.array([1, 2])) == "[1 2]"
+
+
+def test_canonical_id_numpy_nan_is_missing():
+    # A numpy NaN (what a blank numeric cell becomes) canonicalises to the missing
+    # sentinel, like Python float('nan'), so the row is dropped not merged.
+    assert _canonical_id(np.float64("nan")) is _MISSING_ID

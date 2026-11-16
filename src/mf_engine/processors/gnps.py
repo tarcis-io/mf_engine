@@ -52,7 +52,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -160,7 +160,8 @@ def _records_to_frame(records: Records) -> pd.DataFrame:
     themselves and are unaffected.
     """
     records = list(records)
-    return pd.DataFrame(records, dtype=object) if records else pd.DataFrame()
+    frame = pd.DataFrame(records, dtype=object) if records else pd.DataFrame()
+    return cast(pd.DataFrame, frame)
 
 
 def _first_present(columns: Any, candidates: list[str]) -> str | None:
@@ -240,13 +241,14 @@ def _from_float(as_float: float, fallback: Any) -> Any:
 
 def _canonical_index(index: pd.Index) -> pd.Index:
     """Canonicalise every label in ``index`` (object dtype, see _records_to_frame)."""
-    return pd.Index([_canonical_id(v) for v in index], name=index.name, dtype=object)
+    labels = [_canonical_id(v) for v in index]
+    return cast(pd.Index, pd.Index(labels, name=index.name, dtype=object))
 
 
 def _drop_missing_ids(indexed: pd.DataFrame) -> pd.DataFrame:
     """Drop rows whose canonical id is :data:`_MISSING_ID` (missing/blank id)."""
     keep = [label is not _MISSING_ID for label in indexed.index]
-    return indexed[keep]
+    return cast(pd.DataFrame, indexed[keep])
 
 
 def _unique_by_canonical_id(indexed: pd.DataFrame) -> pd.DataFrame:
@@ -259,7 +261,7 @@ def _unique_by_canonical_id(indexed: pd.DataFrame) -> pd.DataFrame:
     indexed = indexed.copy()
     indexed.index = _canonical_index(indexed.index)
     indexed = _drop_missing_ids(indexed)
-    return indexed[~indexed.index.duplicated(keep="first")]
+    return cast(pd.DataFrame, indexed[~indexed.index.duplicated(keep="first")])
 
 
 def _index_by_feature(
@@ -306,7 +308,7 @@ def _aligned_column(
     """Align ``source[src_col]`` to ``feature_ids`` (missing rows/table -> NA)."""
     if source is not None and src_col in source.columns:
         return source[src_col].reindex(feature_ids)
-    return pd.Series(pd.NA, index=feature_ids)
+    return cast(pd.Series, pd.Series(pd.NA, index=feature_ids))
 
 
 def _to_text(value: Any) -> str:
@@ -436,7 +438,9 @@ class GNPSProcessor(Processor):
         # Prepend the Feature ID (from the id list, exact type) and rebuild rows
         # with str keys so the result matches the declared Records type.
         raw = tidy.to_dict("records")
+        # feature_ids and raw are the same length by construction (raw has one
+        # row per feature id); strict=True asserts that rather than truncating.
         return [
             {"Feature ID": fid, **{str(k): v for k, v in row.items()}}
-            for fid, row in zip(feature_ids, raw)
+            for fid, row in zip(feature_ids, raw, strict=True)
         ]

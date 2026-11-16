@@ -59,9 +59,9 @@ source = ["mf_engine"]
 
 [tool.coverage.report]
 show_missing = true
-# Fail CI if coverage regresses. The suite covers effectively every branch; the
-# margin below 100 absorbs a stray uncovered line. Raise toward 100 as desired.
-fail_under = 95
+# Fail CI if coverage regresses. The suite covers every line and branch, so the
+# gate is the full 100% — any new uncovered code fails the build.
+fail_under = 100
 # Pragmas already used in the source (e.g. trivial no-op process() bodies).
 exclude_also = [
     "pragma: no cover",

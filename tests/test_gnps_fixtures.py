@@ -15,6 +15,7 @@ skipping it silently.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -29,14 +30,14 @@ pd = pytest.importorskip("pandas")
 FIXTURES = Path(__file__).parent / "fixtures"
 
 _ANNOTATIONS_CSV = FIXTURES / "mzmine_annotations.csv"
-_FEATURE_TABLE_CSV = FIXTURES / "gnps_feature_table_reformatted.csv"
+_FEATURE_TABLE_CSV = FIXTURES / "gnps_feature_table_reformated.csv"
 _LIBRARY_TSV = FIXTURES / "gnps_merged_results.tsv"
 
 
 def _records(path: Path, *, sep: str = ",") -> list[dict]:
     """Load a committed fixture as records; a missing one is a broken checkout."""
     assert path.exists(), f"committed fixture missing: {path.name}"
-    return pd.read_csv(path, sep=sep).to_dict("records")
+    return cast("list[dict]", pd.read_csv(path, sep=sep).to_dict("records"))
 
 
 @pytest.fixture(scope="module")

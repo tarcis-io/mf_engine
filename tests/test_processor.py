@@ -27,7 +27,11 @@ def test_read_version_falls_back_when_metadata_missing(monkeypatch):
     def _raise(_name: str) -> str:
         raise PackageNotFoundError
 
-    monkeypatch.setattr("importlib.metadata.version", _raise)
+    # _read_version calls ``version`` as bound in mf_engine's own namespace
+    # (``from importlib.metadata import version``), so patch it there — patching
+    # importlib.metadata.version wouldn't affect the already-imported binding and
+    # the real (installed) version would leak through.
+    monkeypatch.setattr(mf_engine, "version", _raise)
     assert mf_engine._read_version() == mf_engine._FALLBACK_VERSION
     assert mf_engine._read_version() == "0.0.0"
 
