@@ -65,6 +65,8 @@ from mf_engine.processors.base import Processor
 
 # Candidate names for the shared feature id in each input table, in preference
 # order (first present wins). ``id`` == ``row ID`` == ``#Scan#`` across tables.
+# The spellings differ per list by design — each is the set of header variants
+# that tool actually emits (e.g. MZmine's ``featureID`` vs GNPS's ``feature_id``).
 _ANNOTATION_ID_CANDIDATES = ["id", "row ID", "featureID", "#Scan#"]
 _FEATURE_TABLE_ID_CANDIDATES = ["row ID", "id", "featureID"]
 _LIBRARY_ID_CANDIDATES = ["#Scan#", "scan", "Scan", "feature_id"]
@@ -136,11 +138,7 @@ class GNPSInput:
 
 @dataclass
 class GNPSResult:
-    """Output of GNPSProcessor: the per-feature annotation records.
-
-    ``process`` always sets ``annotations`` explicitly; the default factory just
-    keeps the dataclass constructible with no arguments (e.g. an empty result).
-    """
+    """Output of GNPSProcessor: the per-feature annotation records."""
 
     annotations: Records = field(default_factory=list)
 
@@ -240,27 +238,22 @@ def _from_float(as_float: float, fallback: Any) -> Any:
 
 
 def _canonical_index(index: pd.Index) -> pd.Index:
-    """Canonicalise every label in ``index`` (object dtype, see _records_to_frame)."""
+    """Apply :func:`_canonical_id` to every label, as an object-dtype Index."""
     labels = [_canonical_id(v) for v in index]
     return cast(pd.Index, pd.Index(labels, name=index.name, dtype=object))
-
-
-def _drop_missing_ids(indexed: pd.DataFrame) -> pd.DataFrame:
-    """Drop rows whose canonical id is :data:`_MISSING_ID` (missing/blank id)."""
-    keep = [label is not _MISSING_ID for label in indexed.index]
-    return cast(pd.DataFrame, indexed[keep])
 
 
 def _unique_by_canonical_id(indexed: pd.DataFrame) -> pd.DataFrame:
     """Canonicalise a just-set index, drop missing ids, keep the first per id.
 
-    Shared by every indexing path so they stay consistent. Collapsing cross-type
-    duplicates (e.g. ``1`` and ``"1"``) keeps the first, which upstream has
-    already ordered so the best-scoring row wins.
+    Shared by every indexing path so they stay consistent. Rows whose canonical
+    id is :data:`_MISSING_ID` (a missing/blank id) are dropped. Collapsing
+    cross-type duplicates (e.g. ``1`` and ``"1"``) keeps the first, which
+    upstream has already ordered so the best-scoring row wins.
     """
     indexed = indexed.copy()
     indexed.index = _canonical_index(indexed.index)
-    indexed = _drop_missing_ids(indexed)
+    indexed = indexed[[label is not _MISSING_ID for label in indexed.index]]
     return cast(pd.DataFrame, indexed[~indexed.index.duplicated(keep="first")])
 
 
@@ -292,12 +285,9 @@ def _index_by_feature(
         ]
     else:
         ordered = df
-    # Set the id as the index, then let the shared helper canonicalise it, drop
-    # missing ids, and collapse duplicates — keeping the first per canonical id,
-    # which the score sort above has made the best-scoring. Deduplicating on the
-    # *canonical* id (not the raw one) is what makes 1 and "1" collapse while
-    # keeping e.g. the integer 1 and the boolean True distinct (True canonicalises
-    # to text), since raw 1 == True would otherwise be treated as one id.
+    # Deduplicate on the *canonical* id (not the raw one), keeping the first per
+    # id — which the score sort above has made the best-scoring. Canonicalising
+    # first is what lets 1 and "1" collapse into one feature.
     indexed = ordered.set_index(id_col)
     return _unique_by_canonical_id(indexed)
 
@@ -392,9 +382,9 @@ class GNPSProcessor(Processor):
             ids |= set(lib.index)
         if not ids:
             return []
-        # ordered_ids (not the index round-trip) is the source of truth for the
-        # emitted Feature ID values and their types; the object-dtype index below
-        # is only for alignment and never re-coerces them.
+        # ordered_ids is the source of truth for the emitted Feature ID values
+        # and their exact types; the object-dtype index below is only for
+        # aligning the source columns and never re-coerces them.
         ordered_ids = sorted(ids, key=_sort_key)
         feature_ids = pd.Index(ordered_ids, name="Feature ID", dtype=object)
 
@@ -430,16 +420,11 @@ class GNPSProcessor(Processor):
                 nums = pd.to_numeric(series, errors="coerce")
                 tidy[col] = nums.astype(object).where(np.isfinite(nums), None)
             else:
-                # Text columns are strings at the source for real exports; a
-                # stray numeric is still rendered sensibly (see _to_text) rather
-                # than leaking a "1.0"-style artifact.
                 tidy[col] = [_to_text(v) for v in series]
 
         # Prepend the Feature ID (from the id list, exact type) and rebuild rows
         # with str keys so the result matches the declared Records type.
         raw = tidy.to_dict("records")
-        # feature_ids and raw are the same length by construction (raw has one
-        # row per feature id); strict=True asserts that rather than truncating.
         return [
             {"Feature ID": fid, **{str(k): v for k, v in row.items()}}
             for fid, row in zip(feature_ids, raw, strict=True)
