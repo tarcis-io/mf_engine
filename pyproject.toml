@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mf_engine"
+version = "0.1.0"
+description = "MassFlow engine: reusable processors for MZmine + GNPS metabolomics batches."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "MassFlow" }]
+keywords = ["mzmine", "gnps", "metabolomics", "processor"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+    "Intended Audience :: Science/Research",
+]
+# No hard runtime dependencies yet: the base package is pure stdlib. Concrete
+# processors that need pandas/openpyxl should declare them via extras below.
+dependencies = []
+
+[project.optional-dependencies]
+# Dependencies used by data-processing concrete processors.
+data = ["pandas>=2.0", "openpyxl>=3.1"]
+# Developer tooling.
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.5",
+    "mypy>=1.8",
+    "pandas-stubs>=2.0",
+]
+
+[project.urls]
+Homepage = "https://massflowai.com"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the typing marker so downstream type checkers see the package as typed.
+mf_engine = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+# pycodestyle (E), pyflakes (F), isort (I), pyupgrade (UP), bugbear (B).
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+packages = ["mf_engine"]
+mypy_path = "src"
+# Strong-but-pragmatic checks rather than full `strict`: the GNPS processor
+# leans on pandas, whose dynamic return types make strict mode noisy. These
+# flags catch the mistakes that matter (missing annotations, unreachable code,
+# silent Anys at the boundary) without fighting pandas internally. Tighten
+# toward `strict = true` later if desired.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+no_implicit_optional = true
+# pandas is optional (the `data` extra); don't fail type-checking of the base
+# package when its stubs aren't installed.
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*"]
+ignore_missing_imports = true
