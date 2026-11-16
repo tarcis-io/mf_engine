@@ -57,26 +57,41 @@ result = GNPSProcessor().process(
 result.annotations  # list[dict], one per annotated feature
 ```
 
-Every output field is a **direct passthrough** of an input column (feature id,
-m/z, RT, per-source score/compound/adduct/formula, and the GNPS taxonomy
-fields) — no derived or interpretive fields such as best-of picks, confidence
-levels, compound-class flags, or group comparisons. Those belong to the caller.
-Features are joined across the three tables by the value of their shared
-feature id. Ids are matched by value regardless of type, so the same feature
-lines up whether a source supplies it as `1`, `1.0`, or `"1"` (as a plain CSV
-reader would), and integer ids keep full precision rather than rounding through
-`float`. A feature annotated by only one source is still returned, with the
-other source's columns left blank. The output is the **union of features
-annotated by either source**; a feature present only in the feature table
-(annotated by neither) is omitted.
+The records boundary means loading real exports is just reading each file and
+calling `to_dict("records")`:
 
-When a feature has several rows in a source, the one with the highest
-`score` / `MQScore` is kept. Scores are compared numerically, so a non-numeric
-or blank score is treated as missing and loses to any real number; when no
-score for a feature is numeric, the first row in input order is kept (the
-result is always deterministic). Messy inputs are tolerated rather than fatal:
-a blank/`NaN` feature id drops just that row, and a missing column or an empty
-table contributes blanks for the affected fields instead of raising.
+```python
+import pandas as pd
+from mf_engine.processors.gnps import GNPSProcessor, GNPSInput
+
+result = GNPSProcessor().process(
+    GNPSInput(
+        annotations=pd.read_csv("mzmine_annotations.csv").to_dict("records"),
+        feature_table=pd.read_csv("gnps_feature_table.csv").to_dict("records"),
+        library=pd.read_csv("gnps_merged_results.tsv", sep="\t").to_dict("records"),
+    )
+)
+```
+
+The output schema — the exact keys, in order, of every result record — is
+available as `mf_engine.processors.ANNOTATION_COLUMNS`, handy for building a
+header row or validating output.
+
+Key guarantees (the `GNPSProcessor` module docstring has the full detail):
+
+- Every output field is a **direct passthrough** of an input column — no derived
+  or interpretive fields (best-of picks, confidence, compound-class flags). Those
+  belong to the caller.
+- The output is the **union of features annotated by either source**; a feature
+  present only in the feature table is omitted. One-source features are returned
+  with the other source's columns blank.
+- Features join by feature id matched *by value regardless of type* (`1`, `1.0`,
+  `"1"` are one feature), with integer ids kept at full precision.
+- Per source, the highest-scoring row per feature wins; non-numeric, blank, and
+  non-finite scores count as missing. Ties and all-missing fall back to input
+  order, so output is deterministic.
+- Messy inputs are tolerated, not fatal: a blank id drops just that row; a
+  missing column or empty table yields blanks rather than raising.
 
 `GNPSProcessor` needs pandas — install the `data` extra. The base `Processor`
 and `import mf_engine` stay dependency-free; pandas is only loaded when a GNPS
@@ -88,7 +103,9 @@ symbol is used.
 source of truth is `pyproject.toml`). When the package is imported from a source
 tree that has **not** been installed, the metadata is unavailable and the value
 falls back to `"0.0.0"` — so `__version__` matches `pyproject.toml` only once
-the package is installed (`pip install -e .`).
+the package is installed (`pip install -e .`). In practice this means a bare
+`src` checkout that was never installed reports `0.0.0`; install the package to
+get the real version.
 
 ## Development
 
@@ -110,16 +127,17 @@ make check        # lint + type-check + tests
 ## Layout
 
 ```
-mf_engine/
+mf_engine/                    # repository root
 ├── pyproject.toml
 ├── README.md
 ├── LICENSE
+├── Makefile
 ├── src/
 │   └── mf_engine/            # the importable package
 │       ├── __init__.py       # exposes `Processor`, `__version__`
 │       ├── py.typed          # PEP 561 typing marker
 │       └── processors/
-│           ├── __init__.py   # exposes `Processor`; lazily exposes GNPS*
+│           ├── __init__.py   # exposes `Processor`; lazily exposes GNPS* + ANNOTATION_COLUMNS
 │           ├── base.py       # the Processor ABC (stdlib only)
 │           └── gnps.py       # GNPSProcessor (needs pandas)
 └── tests/

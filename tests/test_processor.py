@@ -17,10 +17,25 @@ def test_package_exposes_version():
     assert mf_engine.__version__
 
 
+def test_read_version_falls_back_when_metadata_missing(monkeypatch):
+    # The version logic lives in a small, directly testable helper: when the
+    # distribution metadata is unavailable (source tree that was never
+    # installed), _read_version() returns the fallback rather than raising. This
+    # covers the fallback branch without reloading the module.
+    from importlib.metadata import PackageNotFoundError
+
+    def _raise(_name: str) -> str:
+        raise PackageNotFoundError
+
+    monkeypatch.setattr("importlib.metadata.version", _raise)
+    assert mf_engine._read_version() == mf_engine._FALLBACK_VERSION
+    assert mf_engine._read_version() == "0.0.0"
+
+
 def test_version_falls_back_when_not_installed(monkeypatch):
-    # When the distribution metadata is unavailable (running from a source tree
-    # that was never installed), __version__ falls back to "0.0.0" rather than
-    # raising on import.
+    # End-to-end: the module-level __version__ wiring also falls back (not just
+    # the helper in isolation). Reload under patched metadata, then restore real
+    # metadata-backed version for any later tests.
     from importlib.metadata import PackageNotFoundError
 
     def _raise(_name: str) -> str:
@@ -81,7 +96,7 @@ def test_processors_lazily_exposes_gnps_symbols():
     # exposes the GNPS symbols on demand via PEP 562 __getattr__.
     from mf_engine import processors
 
-    for name in ("GNPSProcessor", "GNPSInput", "GNPSResult"):
+    for name in ("GNPSProcessor", "GNPSInput", "GNPSResult", "ANNOTATION_COLUMNS"):
         assert getattr(processors, name) is not None
 
 

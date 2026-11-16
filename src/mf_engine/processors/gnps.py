@@ -45,18 +45,7 @@ The processor tolerates the mess real tables carry:
 * **Missing column or table** — a source whose table is empty, or which lacks a
   mapped column, contributes blanks for those fields instead of raising.
 
-Example
--------
-    from mf_engine.processors.gnps import GNPSProcessor, GNPSInput
-
-    result = GNPSProcessor().process(
-        GNPSInput(
-            annotations=annotations_records,
-            feature_table=feature_table_records,
-            library=library_records,
-        )
-    )
-    result.annotations  # -> list[dict], one per feature
+See the README for a usage example and the loading-from-CSV pattern.
 """
 
 from __future__ import annotations
@@ -65,6 +54,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from mf_engine.processors.base import Processor
@@ -73,16 +63,16 @@ from mf_engine.processors.base import Processor
 # Schema
 # ---------------------------------------------------------------------------
 
-# Candidate names for the shared feature id in each input table (the first one
-# present is used). ``id`` == ``row ID`` == ``#Scan#`` across the three tables.
+# Candidate names for the shared feature id in each input table, in preference
+# order (first present wins). ``id`` == ``row ID`` == ``#Scan#`` across tables.
 _ANNOTATION_ID_CANDIDATES = ["id", "row ID", "featureID", "#Scan#"]
 _FEATURE_TABLE_ID_CANDIDATES = ["row ID", "id", "featureID"]
 _LIBRARY_ID_CANDIDATES = ["#Scan#", "scan", "Scan", "feature_id"]
 
-# The output schema is a single source of truth: output column -> source input
-# column, per table. Every output column is a verbatim copy of one input column
-# (no derived values). The column order and ANNOTATION_COLUMNS are both derived
-# from these mappings, so adding a field in one place can never drift.
+# Output schema, single source of truth: output column -> source input column,
+# per table (every output column is a verbatim copy of one input column).
+# ANNOTATION_COLUMNS and the column order both derive from these, so they can't
+# drift.
 _FEATURE_TABLE_FIELDS = {
     "m/z": "row m/z",
     "RT (min)": "row retention time",
@@ -105,7 +95,8 @@ _LIBRARY_FIELDS = {
     "Subclass (GNPS)": "subclass",
 }
 
-# Output columns, in order: the feature id, then every mapped field.
+# Public output schema: the exact keys, in order, of every GNPSResult record
+# (feature id, then each mapped field). Re-exported from mf_engine.processors.
 ANNOTATION_COLUMNS = [
     "Feature ID",
     *_FEATURE_TABLE_FIELDS,
@@ -155,18 +146,16 @@ class GNPSResult:
 # ---------------------------------------------------------------------------
 
 
-def _frame(records: Records) -> pd.DataFrame:
-    """Build a DataFrame from records, keeping columns at ``object`` dtype.
+def _records_to_frame(records: Records) -> pd.DataFrame:
+    """Build a DataFrame from records, forcing ``object`` dtype.
 
-    Why object dtype: ``pd.DataFrame`` infers a column's dtype from its values, so
-    an id column mixing an integer with any non-integer (e.g. ``1`` and ``1.5``)
-    is inferred as ``float64`` *at construction* — before canonicalisation runs —
-    silently rounding integers through float (``9007199254740993`` ->
-    ``...992.0``). Forcing object dtype keeps every cell as its original Python
-    value, so :func:`_canonical_id` sees exact ids. Numeric handling is
-    unaffected: scoring and the numeric output columns call
-    ``pd.to_numeric(..., errors="coerce")`` themselves, which coerces object input
-    fine. An empty record list yields an empty frame (no columns), as before.
+    This is the one place the object-dtype decision is explained. ``pd.DataFrame``
+    infers a column's dtype from its values, so an id column mixing an integer
+    with a non-integer (``1`` and ``1.5``) becomes ``float64`` *at construction*,
+    before canonicalisation runs, silently rounding large integers through float
+    (``9007199254740993`` -> ``...992.0``). Object dtype keeps every cell as its
+    original Python value so :func:`_canonical_id` sees exact ids; numeric paths
+    coerce with ``pd.to_numeric`` themselves and are unaffected.
     """
     records = list(records)
     return pd.DataFrame(records, dtype=object) if records else pd.DataFrame()
@@ -188,12 +177,8 @@ _MISSING_ID = object()
 
 
 def _is_bool(value: Any) -> bool:
-    """True for a ``bool``, which — being an ``int`` subclass — must be treated as
-    text rather than as the integer ids ``0``/``1``.
-
-    Shared by :func:`_canonical_id` and :func:`_sort_key` so the rule lives in one
-    place and the merge key and the sort order can't drift apart.
-    """
+    # bool is an int subclass; shared by _canonical_id and _sort_key so True/False
+    # ids are kept as text, not the integer ids 0/1, in both the key and the sort.
     return isinstance(value, bool)
 
 
@@ -206,44 +191,34 @@ def _canonical_id(value: Any) -> Any:
     these denote the same feature and must collapse to one key, or the merge
     silently splits a feature into separate half-populated rows.
 
-    The rule: an integer-valued id becomes ``int`` (so ``1``, ``1.0`` and
-    ``"1"`` all become ``1``, and large ids keep full integer precision rather
-    than being rounded through ``float``); a non-integer number becomes
-    ``float``; anything else becomes ``str``. A missing id — ``None`` or a
-    floating-point ``NaN`` (what pandas yields for a blank id cell) — returns the
-    :data:`_MISSING_ID` sentinel so the row can be dropped instead of crashing.
+    The rule: an integer-valued id becomes ``int`` (so ``1``, ``1.0`` and ``"1"``
+    all become ``1``, with full precision for large ids); a non-integer number
+    becomes ``float``; anything else becomes ``str``. A missing id (``None`` or
+    the ``NaN`` pandas yields for a blank cell) returns :data:`_MISSING_ID` so the
+    row is dropped rather than crashing.
 
-    Because a *string* id is parsed numerically, some text that merely looks
-    numeric is canonicalised rather than kept verbatim — intentional, since real
-    feature ids are numbers that different readers stringify differently:
-
-    * ``"1e3"`` (and other float-parseable text) becomes the number ``1000`` —
-      a scientific-notation id merges with the integer ``1000``.
-    * ``"NaN"`` / ``"nan"`` parses to a float ``NaN``, so it is treated as a
-      *missing* id and its row is dropped — a genuine text id literally spelled
-      "NaN" would therefore disappear. ``"inf"`` / ``"-inf"`` parses to an
-      infinity, which is not a usable id and is kept as text (``fallback``) so it
-      can't masquerade as a feature. These collisions don't arise with real
-      MZmine/GNPS numeric ids; only a non-numeric text id survives untouched.
+    Note the consequence of parsing string ids numerically: ``"1e3"`` merges with
+    the integer ``1000``; ``"NaN"``/``"nan"`` is treated as missing (so a text id
+    literally spelled "NaN" disappears); ``"inf"``/``"-inf"`` is kept as text so
+    it can't masquerade as a feature. None of these collide with real MZmine/GNPS
+    numeric ids; a genuine non-numeric text id survives untouched.
     """
     if value is None:
         return _MISSING_ID
-    if _is_bool(value):  # bool is an int subclass; treat as text
+    if _is_bool(value):
         return str(value)
-    # Integer ids stay exact: never route through float, so ids beyond 2**53
-    # don't lose precision. This also catches numpy integer scalars (int64,
-    # etc.) that pandas yields, which are not Python ``int`` instances.
+    # Integer ids stay exact (never routed through float), so ids beyond 2**53
+    # keep full precision. __index__ also catches numpy integer scalars.
     if isinstance(value, int):
         return value
-    if hasattr(value, "__index__"):  # numpy.int64 and other integral scalars
+    if hasattr(value, "__index__"):
         return int(value)
     if isinstance(value, str):
-        # Try an exact integer parse first (keeps full precision for "12345...").
+        # Exact integer parse first (full precision), then float ("1.0"/"1e3").
         try:
             return int(value)
         except ValueError:
             pass
-        # Then a float parse for things like "1.0" / "1.5" / "1e3".
         try:
             as_float = float(value)
         except ValueError:
@@ -260,8 +235,8 @@ def _canonical_id(value: Any) -> Any:
 def _from_float(as_float: float, fallback: Any) -> Any:
     """Canonicalise a parsed float: int when integer-valued, else float.
 
-    NaN (a blank id cell) and ±inf are not usable ids: NaN -> missing sentinel,
-    inf -> ``fallback`` kept as text so it can't masquerade as a feature.
+    NaN -> missing sentinel; ±inf -> ``fallback`` kept as text (see
+    :func:`_canonical_id` for why neither is a usable id).
     """
     if math.isnan(as_float):
         return _MISSING_ID
@@ -274,9 +249,8 @@ def _from_float(as_float: float, fallback: Any) -> Any:
 def _canonical_index(index: pd.Index) -> pd.Index:
     """Return ``index`` with every label canonicalised by :func:`_canonical_id`.
 
-    Built at ``object`` dtype so a mix of int and non-integer ids keeps each
-    label's exact Python type (and full integer precision) instead of pandas
-    coercing the whole index to ``float64``.
+    Object dtype for the same reason as :func:`_records_to_frame`: keep each
+    label's exact type rather than let pandas coerce the index to ``float64``.
     """
     return pd.Index([_canonical_id(v) for v in index], name=index.name, dtype=object)
 
@@ -318,11 +292,11 @@ def _best_per_feature(
     if id_col is None:
         return None
     if score_col is not None and score_col in df.columns:
-        # Sort by the score *numerically*: a non-numeric or blank score column
-        # would otherwise sort lexically (``"low" > "high"``) and silently keep
-        # the wrong row. Non-numeric/blank scores coerce to NaN and sort last,
-        # so a real numeric winner is always preferred over them.
+        # Rank numerically, not lexically ("low" > "high"). Non-numeric, blank,
+        # and non-finite (±inf) scores all coerce to NaN and sort last, so a real
+        # finite winner always beats them.
         score = pd.to_numeric(df[score_col], errors="coerce")
+        score = score.where(np.isfinite(score))
         ordered = df.iloc[
             score.reset_index(drop=True)
             .sort_values(ascending=False, na_position="last", kind="stable")
@@ -337,7 +311,7 @@ def _best_per_feature(
     return _unique_by_canonical_id(indexed)
 
 
-def _column(
+def _aligned_column(
     source: pd.DataFrame | None, feature_ids: pd.Index, src_col: str
 ) -> pd.Series:
     """Align ``source[src_col]`` to ``feature_ids`` (missing rows/table -> NA)."""
@@ -346,19 +320,20 @@ def _column(
     return pd.Series(pd.NA, index=feature_ids)
 
 
-def _sort_key(value: Any) -> tuple[int, Any]:
+def _sort_key(value: Any) -> tuple[int, str, Any]:
     """Order ids so mixed/incomparable types never raise.
 
-    Numbers sort before non-numbers; within each group the natural order
-    applies. Ids are already canonicalised by :func:`_canonical_id` before they
-    reach here — so numeric values are ``int``/``float`` and the rest ``str`` —
-    which is exactly why this stays consistent with the merge key.
+    Numbers sort (numerically) before non-numbers, each in natural order. The
+    numeric value is kept as-is rather than cast to ``float``, so two integer ids
+    that differ only beyond 2**53 still order correctly. The tuple shape is
+    uniform across groups, but number-vs-string comparisons are gated by the
+    first element, so ``int``/``float`` and ``str`` are never compared directly.
     """
-    if _is_bool(value):  # bool is an int subclass; treat as text
-        return (1, str(value))
+    if _is_bool(value):  # bool is an int subclass; order as text
+        return (1, str(value), None)
     if isinstance(value, (int, float)):
-        return (0, float(value))
-    return (1, str(value))
+        return (0, "", value)
+    return (1, str(value), None)
 
 
 # ---------------------------------------------------------------------------
@@ -376,9 +351,9 @@ class GNPSProcessor(Processor):
 
     def process(self, data: GNPSInput) -> GNPSResult:
         """Build the annotations table from the three input tables."""
-        annotations = _frame(data.annotations)
-        feature_table = _frame(data.feature_table)
-        library = _frame(data.library)
+        annotations = _records_to_frame(data.annotations)
+        feature_table = _records_to_frame(data.feature_table)
+        library = _records_to_frame(data.library)
 
         records = self._build_annotations(annotations, feature_table, library)
         return GNPSResult(annotations=records)
@@ -391,15 +366,14 @@ class GNPSProcessor(Processor):
         feature_table: pd.DataFrame,
         library: pd.DataFrame,
     ) -> Records:
-        # Index each table by feature id. The annotation and library tables keep
-        # the highest-scoring row per feature; the feature table is unscored, so
-        # the first row per id wins on the off chance of a duplicate id (same
-        # path, score_col=None).
+        # Scored tables keep the highest-scoring row per feature; the feature
+        # table is unscored (score_col=None -> first row per id wins).
         ann = _best_per_feature(annotations, _ANNOTATION_ID_CANDIDATES, "score")
         lib = _best_per_feature(library, _LIBRARY_ID_CANDIDATES, "MQScore")
         feat = _best_per_feature(feature_table, _FEATURE_TABLE_ID_CANDIDATES)
 
-        # The feature set is the union of features annotated by either source.
+        # Output row set = union of features annotated by either source (see the
+        # module docstring); a feature-table-only feature contributes no id here.
         ids: set[Any] = set()
         if ann is not None:
             ids |= set(ann.index)
@@ -407,17 +381,14 @@ class GNPSProcessor(Processor):
             ids |= set(lib.index)
         if not ids:
             return []
-        # Keep the ordered ids as a plain Python list: it is the source of truth
-        # for the Feature ID *values and their types*. The pandas index built from
-        # it is object-dtype so alignment never coerces a mixed int/float id set
-        # to float; but the emitted Feature ID is taken from this list, not from
-        # the index round-trip, so each id keeps its exact Python type.
+        # ordered_ids (not the index round-trip) is the source of truth for the
+        # emitted Feature ID values and their types; the object-dtype index below
+        # is only for alignment and never re-coerces them.
         ordered_ids = sorted(ids, key=_sort_key)
         feature_ids = pd.Index(ordered_ids, name="Feature ID", dtype=object)
 
-        # Assemble the output column-by-column (vectorised); each column is a
-        # straight copy of a source column aligned to the feature id index.
-        # _column tolerates a missing table/column by filling with NA.
+        # Each column is a source column aligned to the feature ids; a missing
+        # table/column fills with NA.
         out = pd.DataFrame(index=feature_ids)
         for source, mapping in (
             (feat, _FEATURE_TABLE_FIELDS),
@@ -425,7 +396,7 @@ class GNPSProcessor(Processor):
             (lib, _LIBRARY_FIELDS),
         ):
             for out_col, src_col in mapping.items():
-                out[out_col] = _column(source, feature_ids, src_col)
+                out[out_col] = _aligned_column(source, feature_ids, src_col)
 
         return self._to_records(ordered_ids, out)
 
@@ -433,31 +404,27 @@ class GNPSProcessor(Processor):
     def _to_records(feature_ids: list[Any], out: pd.DataFrame) -> Records:
         """Convert the assembled frame to records with tidy value types.
 
-        ``feature_ids`` is the ordered list of canonical ids (same order as
-        ``out``'s rows); it supplies the ``Feature ID`` column directly so each id
-        keeps its exact Python type rather than being re-coerced through a pandas
-        index. Numeric columns become ``float`` or ``None``; text columns become
-        ``str`` or ``""``. Coercion is done per-column (vectorised).
+        ``feature_ids`` (same order as ``out``'s rows) supplies the ``Feature ID``
+        column directly, so each id keeps its exact Python type. Numeric columns
+        become ``float``/``None``, text columns ``str``/``""``, per column.
         """
-        # Row-position index so each tidied column lines up with feature_ids by
-        # position, independent of the (object-dtype) feature id index.
+        # Row-position index so columns line up with feature_ids by position,
+        # independent of the object-dtype feature id index.
         tidy = pd.DataFrame(index=range(len(feature_ids)))
         for col in out.columns:
             series = out[col].reset_index(drop=True)
             if col in _NUMERIC_COLUMNS:
-                # NaN -> None (object dtype so None survives to_dict).
+                # Blank/non-numeric/±inf all -> None (object dtype so None
+                # survives to_dict); only finite floats are emitted.
                 nums = pd.to_numeric(series, errors="coerce")
-                tidy[col] = nums.astype(object).where(nums.notna(), None)
+                tidy[col] = nums.astype(object).where(np.isfinite(nums), None)
             else:
-                # Text columns are assumed string-valued at the source (compound
-                # name, adduct, formula, taxonomy). A numeric value slipping into
-                # one would stringify verbatim (float 5.0 -> "5.0"); that never
-                # happens with real MZmine/GNPS exports, so no numeric guard here.
+                # Text columns are string at the source; a stray numeric would
+                # stringify verbatim, which never happens with real exports.
                 tidy[col] = series.where(series.notna(), "").astype(str)
 
-        # to_dict("records") is typed as list[dict[Hashable, Any]]; prepend the
-        # Feature ID from the id list and rebuild with str keys so the return
-        # matches the declared Records type exactly.
+        # Prepend the Feature ID (from the id list, exact type) and rebuild rows
+        # with str keys so the result matches the declared Records type.
         raw = tidy.to_dict("records")
         return [
             {"Feature ID": fid, **{str(k): v for k, v in row.items()}}

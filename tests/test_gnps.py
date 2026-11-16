@@ -245,6 +245,44 @@ def test_ids_merge_across_mismatched_types():
     assert row["m/z"] == pytest.approx(300.0)  # from feature table (str id)
 
 
+def test_whitespace_padded_string_id_merges_with_number():
+    # Ids that arrive as text are parsed numerically, so a CSV reader's padded
+    # cell (" 1 ") denotes the same feature as the integer 1 and must merge into
+    # one row rather than split into two.
+    inp = GNPSInput(
+        annotations=[{"id": " 1 ", "compound_name": "MZ", "score": 0.5}],
+        feature_table=[{"row ID": 1, "row m/z": 300.0, "row retention time": 5.0}],
+        library=[{"#Scan#": 1, "Compound_Name": "GN", "MQScore": 0.9}],
+    )
+    result = GNPSProcessor().process(inp)
+    assert len(result.annotations) == 1
+    row = result.annotations[0]
+    assert row["Feature ID"] == 1
+    assert row["Compound MZmine"] == "MZ"
+    assert row["Compound GNPS"] == "GN"
+    assert row["m/z"] == pytest.approx(300.0)
+
+
+def test_numeric_string_values_coerce_in_numeric_columns():
+    # A generic caller (e.g. a plain csv.DictReader) supplies every cell as a
+    # string. Numeric output columns must still come out as floats, not strings —
+    # the documented records-in contract covers string inputs.
+    inp = GNPSInput(
+        annotations=[{"id": "1", "compound_name": "MZ", "score": "0.95"}],
+        feature_table=[
+            {"row ID": "1", "row m/z": "300.0870", "row retention time": "5.5"}
+        ],
+        library=[{"#Scan#": "1", "Compound_Name": "GN", "MQScore": "0.90"}],
+    )
+    row = GNPSProcessor().process(inp).annotations[0]
+    assert row["m/z"] == pytest.approx(300.0870, abs=1e-4)
+    assert isinstance(row["m/z"], float)
+    assert row["RT (min)"] == pytest.approx(5.5)
+    assert row["Score MZmine"] == pytest.approx(0.95)
+    assert isinstance(row["Score MZmine"], float)
+    assert row["Score GNPS"] == pytest.approx(0.90)
+
+
 def _cross_type_same_id_result(rows: list[dict]) -> dict:
     # Run the processor over a single annotations table and return its one row.
     result = GNPSProcessor().process(
@@ -368,6 +406,63 @@ def test_non_numeric_score_prefers_numeric_winner():
     assert f1["Compound MZmine"] == "winner"
 
 
+def test_infinite_score_loses_to_a_real_number():
+    # A ``±inf`` score is not a usable score: ``to_numeric`` would parse it, which
+    # without a guard lets "inf" beat every finite score (and "-inf" lose to all).
+    # Both must be treated as missing, so the genuine numeric row wins regardless
+    # of input order.
+    for order in (
+        [
+            {"id": 1, "compound_name": "infrow", "score": "inf"},
+            {"id": 1, "compound_name": "winner", "score": 0.5},
+        ],
+        [
+            {"id": 1, "compound_name": "winner", "score": 0.5},
+            {"id": 1, "compound_name": "infrow", "score": "inf"},
+        ],
+        [
+            {"id": 1, "compound_name": "neginfrow", "score": "-inf"},
+            {"id": 1, "compound_name": "winner", "score": 0.5},
+        ],
+    ):
+        inp = GNPSInput(annotations=order, feature_table=[], library=[])
+        f1 = {r["Feature ID"]: r for r in GNPSProcessor().process(inp).annotations}[1]
+        assert f1["Compound MZmine"] == "winner"
+        assert f1["Score MZmine"] == pytest.approx(0.5)
+
+
+def test_all_infinite_scores_keep_first_deterministically():
+    # When every score for a feature is non-finite, they all tie as missing and
+    # the stable sort keeps the first in input order; the emitted score is None,
+    # never ``inf``.
+    inp = GNPSInput(
+        annotations=[
+            {"id": 1, "compound_name": "first", "score": "inf"},
+            {"id": 1, "compound_name": "second", "score": "inf"},
+        ],
+        feature_table=[],
+        library=[],
+    )
+    f1 = {r["Feature ID"]: r for r in GNPSProcessor().process(inp).annotations}[1]
+    assert f1["Compound MZmine"] == "first"
+    assert f1["Score MZmine"] is None
+
+
+def test_infinite_numeric_value_becomes_none_not_inf():
+    # A non-finite value in a numeric output column (here an ``inf`` m/z) must be
+    # emitted as None, not leaked through as ``inf``.
+    inp = GNPSInput(
+        annotations=[{"id": 1, "compound_name": "a", "score": 0.5}],
+        feature_table=[
+            {"row ID": 1, "row m/z": float("inf"), "row retention time": 1.0}
+        ],
+        library=[],
+    )
+    f1 = {r["Feature ID"]: r for r in GNPSProcessor().process(inp).annotations}[1]
+    assert f1["m/z"] is None
+    assert f1["RT (min)"] == pytest.approx(1.0)
+
+
 def test_all_non_numeric_scores_keep_first_deterministically():
     # When no score parses as a number, every row ties (all NaN) and the stable
     # sort keeps the first in input order — never a lexical "low" > "high" pick.
@@ -417,6 +512,24 @@ def test_large_integer_id_keeps_full_precision():
     assert row["Feature ID"] == big
     assert row["Compound MZmine"] == "MZ"
     assert row["Compound GNPS"] == "GN"
+
+
+def test_large_integer_ids_sort_in_exact_numeric_order():
+    # Two ids differing only beyond 2**53 must still come out in numeric order.
+    # Routing the sort key through float would collapse them to one key and leave
+    # their order to chance; the key keeps ints exact so ascending is guaranteed.
+    lo = 9007199254740992  # 2**53
+    hi = 9007199254740993  # 2**53 + 1
+    inp = GNPSInput(
+        annotations=[
+            {"id": hi, "compound_name": "hi", "score": 0.5},
+            {"id": lo, "compound_name": "lo", "score": 0.5},
+        ],
+        feature_table=[],
+        library=[],
+    )
+    ids = [r["Feature ID"] for r in GNPSProcessor().process(inp).annotations]
+    assert ids == [lo, hi]
 
 
 def test_mixed_integer_and_float_ids_keep_their_type():

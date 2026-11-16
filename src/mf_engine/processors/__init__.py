@@ -10,10 +10,26 @@ from typing import TYPE_CHECKING, Any
 
 from mf_engine.processors.base import Processor
 
-__all__ = ["Processor", "GNPSProcessor", "GNPSInput", "GNPSResult"]
+__all__ = [
+    "Processor",
+    "GNPSProcessor",
+    "GNPSInput",
+    "GNPSResult",
+    "ANNOTATION_COLUMNS",
+]
+
+# The GNPS symbols exposed lazily by __getattr__ (all live in the gnps module).
+# ANNOTATION_COLUMNS is the public output schema — the ordered list of columns in
+# every GNPSResult record — exposed so callers can build headers / validate.
+_LAZY_GNPS_SYMBOLS = ("GNPSProcessor", "GNPSInput", "GNPSResult", "ANNOTATION_COLUMNS")
 
 if TYPE_CHECKING:  # for type checkers / IDEs only
-    from mf_engine.processors.gnps import GNPSInput, GNPSProcessor, GNPSResult
+    from mf_engine.processors.gnps import (
+        ANNOTATION_COLUMNS,
+        GNPSInput,
+        GNPSProcessor,
+        GNPSResult,
+    )
 
 
 def __getattr__(name: str) -> Any:
@@ -22,7 +38,7 @@ def __getattr__(name: str) -> Any:
     This keeps ``import mf_engine.processors`` dependency-free; pandas is only
     imported when a GNPS symbol is actually accessed.
     """
-    if name in ("GNPSProcessor", "GNPSInput", "GNPSResult"):
+    if name in _LAZY_GNPS_SYMBOLS:
         from mf_engine.processors import gnps
 
         return getattr(gnps, name)

@@ -138,6 +138,26 @@ def test_missing_library_columns_fill_blank_without_raising(
             assert row[col] == ""
 
 
+def test_feature_table_only_features_are_excluded_in_real_data(
+    real_input: GNPSInput, real_rows: list[dict]
+) -> None:
+    # At integration scale: features present in the feature table but annotated
+    # by neither MZmine nor GNPS must not appear in the output (mirrors the
+    # unit-level test_feature_table_only_feature_is_excluded). Only assert the
+    # exclusion if the dataset actually contains such features.
+    def _ids(records: list[dict], key: str) -> set[int]:
+        col = pd.to_numeric(pd.Series([r.get(key) for r in records]), errors="coerce")
+        return {int(v) for v in col.dropna()}
+
+    annotated = _ids(real_input.annotations, "id") | _ids(
+        real_input.library, "#Scan#"
+    )
+    feature_only = _ids(real_input.feature_table, "row ID") - annotated
+    got = {r["Feature ID"] for r in real_rows}
+    if feature_only:
+        assert not (feature_only & got)
+
+
 def test_best_scoring_annotation_kept_per_feature(
     real_input: GNPSInput, real_rows: list[dict]
 ) -> None:

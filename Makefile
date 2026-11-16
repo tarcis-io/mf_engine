@@ -3,7 +3,7 @@
 #
 # `make check` runs lint, type-check, and tests together.
 
-.PHONY: help install test lint typecheck check
+.PHONY: help install test cov lint typecheck check
 
 help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -14,6 +14,9 @@ install:  ## Editable install with data + dev extras
 
 test:  ## Run the test suite
 	pytest
+
+cov:  ## Run the test suite with a coverage report
+	pytest --cov=mf_engine
 
 lint:  ## Lint with ruff
 	ruff check .
